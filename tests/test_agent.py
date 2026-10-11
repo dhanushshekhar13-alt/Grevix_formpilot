@@ -52,6 +52,7 @@ async def test_done_without_receipt_is_rejected(settings, spec, sink):
 
 async def test_irreversible_click_needs_confirmation_and_denial_stops(settings, spec, sink):
     spec.mock = False
+    spec.commits[0].pop("max_amount")  # this page shows no amount; the cap's own behaviour there is tested below
 
     async def deny(kind, q):
         assert kind == "confirm"

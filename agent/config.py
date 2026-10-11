@@ -28,6 +28,10 @@ class Settings:
     coord_mode: str = "norm1000"  # "norm1000" (Qwen3-VL grid 0..1000) or "pixels"
     headed: bool = False
     record_video: bool = True
+    approve_commits: Optional[bool] = None  # ask the human before every irreversible action; None = task default (not mock)
+    dry_run: bool = False                   # do everything up to the first irreversible action, then stop without sending it
+    max_amount: Optional[float] = None      # spending limit for every irreversible action (a task's own cap also applies)
+    presubmit_check: bool = True            # hold a submit while its form still has required fields empty
     fault: str = ""  # "crash_after_commit": simulate the agent dying right after an irreversible click is dispatched
     width: int = 1280
     height: int = 800
@@ -50,6 +54,10 @@ class Settings:
             headed=_b("FORMPILOT_HEADED", "0"),
             record_video=_b("FORMPILOT_RECORD_VIDEO", "1"),
             fault=os.getenv("FORMPILOT_FAULT", ""),
+            approve_commits=_b("FORMPILOT_APPROVE_COMMITS", "0") if os.getenv("FORMPILOT_APPROVE_COMMITS") else None,
+            presubmit_check=_b("FORMPILOT_PRESUBMIT_CHECK", "1"),
+            dry_run=_b("FORMPILOT_DRY_RUN", "0"),
+            max_amount=float(os.environ["FORMPILOT_MAX_AMOUNT"]) if os.getenv("FORMPILOT_MAX_AMOUNT") else None,
         )
 
     def public(self) -> dict:

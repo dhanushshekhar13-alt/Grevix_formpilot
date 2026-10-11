@@ -3,9 +3,11 @@
   observe  - no side effects (scroll, wait, look)           -> retried freely
   local    - edits the current page only (type, select, tick) -> safe to redo
   navigate - submits a step / follows a link                  -> redo only after re-reading the screen (never auto-retried)
-  commit   - irreversible server-side effect (payment, final submit)
+  commit   - irreversible server-side effect (payment, final submit, delete, cancel, withdraw...)
              -> exactly once: logged BEFORE it is dispatched, verified against evidence after,
                 never repeated while its outcome is unknown; a human resolves doubt (and approves first, if configured)
+                A commit is: one the task declares, one the model flags, or any button whose own label says so
+                (IRREVERSIBLE_LABELS). A task may cap the amount (max_amount): above it, nothing is sent.
 
 The class is decided from what is actually under the pointer (DOM probe), not from the model's self-report alone.
 """
@@ -29,6 +31,25 @@ RETRY_POLICY = {
     NAVIGATE: "redo only after re-reading the screen",
     COMMIT: "never repeat; verify; human resolves doubt",
 }
+
+# Buttons that cannot be taken back on any portal, whatever the task file says. Matched against the DOM label only.
+IRREVERSIBLE_LABELS = (r"\b(pay|pay now|pay again|make payment|confirm payment|retry payment|final submit|final submission|"
+                       r"submit application|submit (and|&) lock|confirm (and|&) submit|lock (choices|application|form)|freeze|"
+                       r"delete|withdraw|surrender|cancel (application|registration|booking|admission)|place order|book now|"
+                       r"send money|transfer)\b")
+MONEY = re.compile(r"(?:Rs\.?|\u20b9|INR)\s*(\d[\d,]*(?:\.\d+)?)", re.I)
+
+
+def money(text: str) -> List[float]:
+    """Every rupee figure in a piece of page text."""
+    out = []
+    for g in MONEY.findall(text or ""):
+        try:
+            out.append(float(g.replace(",", "")))
+        except ValueError:
+            pass
+    return out
+
 
 INTENT, DISPATCHED, IN_DOUBT = "intent", "dispatched", "in_doubt"
 CONFIRMED, REJECTED = "confirmed", "rejected"
@@ -55,7 +76,7 @@ PROBE_JS = """([x, y]) => {
     if (tag === 'BUTTON' || tag === 'A') return {actionable: true, tag, submits: tag === 'A' || isSubmit, label, via: 'enter'};
     return {actionable: false, tag, label: '', submits: false};
   }
-  return {actionable: true, tag, submits: isSubmit || tag === 'A', label};
+  return {actionable: true, tag, submits: isSubmit || tag === 'A', label, field};
 }"""
 
 
@@ -66,6 +87,14 @@ class CommitSpec:
     confirmed_regex: Optional[str] = None   # page text that proves it happened (group 1 = reference)
     rejected_regex: Optional[str] = None    # page text that proves it did NOT happen (safe to try again)
     human_first: Optional[bool] = None      # None -> task default (not mock)
+    max_amount: Optional[float] = None      # hard cap: if the page shows more (or no readable amount), nothing is sent
+    amount_regex: Optional[str] = None      # where the amount is on the page (its groups are summed); default: every rupee figure
+
+    def amount(self, text: str) -> List[float]:
+        if not self.amount_regex:
+            return money(text)
+        m = re.search(self.amount_regex, text or "", re.I | re.S)
+        return [float(g.replace(",", "")) for g in (m.groups() if m else ()) if g and re.fullmatch(r"\d[\d,]*(?:\.\d+)?", g)]
 
     def matches(self, label: str) -> bool:
         return bool(label) and bool(re.search(self.label_regex, label, re.I))
@@ -108,7 +137,8 @@ def classify(act, pr: dict, specs: List[CommitSpec], success_regex: Optional[str
         if c.matches(label):
             return COMMIT, c, label
     flagged = getattr(act, "irreversible", False)
-    if flagged and (pr.get("submits") or not pr.get("actionable")):
+    named = pr.get("actionable") and not pr.get("field") and re.search(IRREVERSIBLE_LABELS, label, re.I)  # the button says so itself
+    if named or (flagged and (pr.get("submits") or not pr.get("actionable"))):
         return COMMIT, CommitSpec(name=f"irreversible: {label[:40] or 'unlabelled'}", label_regex=re.escape(label or "-"),
                                   confirmed_regex=success_regex), label
     return (NAVIGATE if pr.get("submits") else LOCAL), None, label

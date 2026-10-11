@@ -33,10 +33,11 @@ class ScriptedPlanner:
     """dup_attempts: how many times it greedily tries to pay again when a payment's outcome is unclear (to prove the
     ledger blocks it). pay_without_upi: first press Pay Now with no UPI chosen (a provably rejected commit)."""
 
-    def __init__(self, dup_attempts: int = 0, pay_without_upi: bool = False, guess_codes: bool = False):
+    def __init__(self, dup_attempts: int = 0, pay_without_upi: bool = False, guess_codes: bool = False, pay_without_upi_id: bool = False):
         self.page, self.i = None, 0
         self.dup_left = dup_attempts
         self.pay_without_upi = pay_without_upi
+        self.pay_without_upi_id = pay_without_upi_id  # chooses UPI, then presses Pay Now with the UPI ID box still empty
         self.guess_codes = guess_codes  # types its own OTP / CAPTCHA without asking, like a small model does
         self.seen = []
 
@@ -109,7 +110,9 @@ class ScriptedPlanner:
             lambda: self._click("button:has-text('Submit')"),
             lambda: self._click("[name=decl]"), lambda: self._click("button:has-text('Proceed')"),
             *([lambda: self._click("button:has-text('Pay Now')", irreversible=True, target="Pay Now")] if self.pay_without_upi else []),
-            lambda: self._click("input[value=upi]"), lambda: self._type("[name=upi]", "ananya@okaxis", sensitive=True),
+            lambda: self._click("input[value=upi]"),
+            *([lambda: self._click("button:has-text('Pay Now')", irreversible=True, target="Pay Now")] if self.pay_without_upi_id else []),
+            lambda: self._type("[name=upi]", "ananya@okaxis", sensitive=True),
             lambda: self._click("button:has-text('Pay Now')", irreversible=True, target="Pay Now"),
             lambda: self._done(),
         ]

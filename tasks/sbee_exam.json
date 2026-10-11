@@ -37,7 +37,8 @@
       "name": "fee_payment",
       "label_regex": "\\b(pay now|pay again|make payment|confirm payment|retry payment)\\b",
       "confirmed_regex": "Registration Successful[\\s\\S]*?Reference No:\\s*([A-Z0-9]{8,})|Payment received",
-      "rejected_regex": "Select UPI and enter a valid UPI ID"
+      "rejected_regex": "Select UPI and enter a valid UPI ID",
+      "max_amount": 1000
     }
   ]
 }

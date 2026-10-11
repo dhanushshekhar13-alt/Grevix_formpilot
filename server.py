@@ -35,6 +35,9 @@ class RunReq(BaseModel):
     hints: Optional[list] = None
     fault: str = ""                  # "", "expire_after_pay", "crash_after_commit", "both"
     resume_run_id: Optional[str] = None
+    approve_commits: Optional[bool] = None  # ask before every irreversible action (None = task default)
+    dry_run: bool = False                   # stop before the first irreversible action without sending it
+    max_amount: Optional[float] = None      # spending limit in rupees for this run
 
 
 async def arm_portal_fault(url: str, mode: str):
@@ -113,6 +116,11 @@ async def run(req: RunReq):
         if req.profile: spec.profile = req.profile
         if req.hints is not None: spec.hints = req.hints
     await arm_portal_fault(spec.url, "expire_after_pay" if req.fault in ("expire_after_pay", "both") else "")
+    if req.approve_commits is not None:
+        s.approve_commits = req.approve_commits
+    s.dry_run = req.dry_run
+    if req.max_amount is not None and req.max_amount > 0:
+        s.max_amount = req.max_amount
     if req.fault in ("crash_after_commit", "both"):
         s.fault = "crash_after_commit"
     history.clear()

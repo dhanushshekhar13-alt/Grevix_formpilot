@@ -29,6 +29,11 @@ button.sec{background:var(--line);color:var(--tx)}
 #modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);align-items:center;justify-content:center;z-index:9}
 #modal.show{display:flex}#modal .box{background:var(--card);border:1px solid var(--acc);border-radius:12px;padding:18px;width:min(560px,92vw)}
 #modal img{width:100%;border-radius:6px;margin:8px 0}#modal input{width:100%;padding:10px;font-size:18px;letter-spacing:.2em;background:#0c0e12;border:1px solid var(--line);color:var(--tx);border-radius:6px;margin-bottom:10px}
+#mdet{font-size:13px;margin:8px 0}#mdet table{width:100%;border-collapse:collapse}#mdet td{padding:4px 6px;border-bottom:1px solid var(--line);vertical-align:top}#mdet td:first-child{color:var(--mut);width:34%}
+#mdet .amt{font-size:15px;font-weight:600;margin:4px 0}#mdet .warn{color:var(--red);font-weight:600;margin-top:6px}
+.chip.held,.chip.dry_run{background:#3a2f12;color:#f0c060}.chip.over_limit{background:#431818;color:#ff8f8f}.row.fin.dry{border-color:var(--amb);background:#2a2412}
+.appr input[type=number]{width:90px;padding:3px 6px;background:#0c0e12;border:1px solid var(--line);color:var(--tx);border-radius:5px}.appr span{margin-left:auto}
+.chip.held{background:#3a2f12;color:#f0c060}.appr{font-size:12px;color:var(--mut);display:flex;gap:6px;align-items:center;margin-bottom:8px}
 .phone{background:#0c0e12;border:1px dashed var(--line);border-radius:8px;padding:8px;margin:8px 0;font-size:13px}.phone b{color:#6fe08a}
 </style></head><body>
 <header><h1>Form<b>Pilot</b> AI</h1><span>Vision agent for messy Indian portals &middot; no APIs, just pixels</span><div class="badge" id="badge">idle</div></header>
@@ -41,6 +46,8 @@ button.sec{background:var(--line);color:var(--tx)}
       <option value="expire_after_pay">Inject: session expires right after the payment is taken</option>
       <option value="crash_after_commit">Inject: agent crashes right after clicking Pay</option>
       <option value="both">Inject: both (crash + expired session)</option></select></div>
+    <label class="appr"><input type="checkbox" id="approve" checked> Ask me before any irreversible action (payment, final submit, delete, cancel)</label>
+    <div class="appr"><label><input type="checkbox" id="dry"> Dry run: fill everything, stop right before the irreversible click</label><span>Spending limit Rs. <input type="number" id="limit" min="0" placeholder="task default"></span></div>
     <div id="health" style="font-size:12px;color:var(--mut);margin-bottom:8px"></div>
     <img id="screen" alt="agent view">
   </section>
@@ -50,7 +57,7 @@ button.sec{background:var(--line);color:var(--tx)}
   </div>
 </main>
 <div id="modal"><div class="box">
-  <h2 style="margin:0;color:var(--acc)" id="mt">Human input needed</h2><p id="mq"></p>
+  <h2 style="margin:0;color:var(--acc)" id="mt">Human input needed</h2><p id="mq"></p><div id="mdet"></div>
   <img id="mimg" alt="">
   <div class="phone" id="phone" style="display:none"><b>Your phone (SMS):</b><div id="sms">No messages yet</div></div>
   <input id="ans" autocomplete="off" placeholder="Type here"><button id="send">Send to agent</button>
@@ -71,19 +78,23 @@ function connect(){const es=new EventSource('/events');es.onmessage=m=>{const e=
   else if(e.type==='thought')row('thought','<small>reading screen &middot; step '+e.step+'</small>'+esc(e.text));
   else if(e.type==='action'&&e.name!=='ask_human'&&e.name!=='done'&&e.name!=='error')rows[e.step]=row('action'+(e.effect==='commit'?' commit':''),'<small>acting &middot; step '+e.step+chip(e.effect)+'</small><code>'+esc(e.text)+'</code>');
   else if(e.type==='outcome'){const r=rows[e.step];if(r)r.querySelector('small').insertAdjacentHTML('beforeend',chip(e.outcome));
-    if(['blocked','in_doubt','rejected','mismatch'].includes(e.outcome)&&r)r.insertAdjacentHTML('beforeend','<small>'+esc(e.detail)+'</small>')}
+    if(['blocked','held','over_limit','dry_run','in_doubt','rejected','mismatch'].includes(e.outcome)&&r)r.insertAdjacentHTML('beforeend','<small>'+esc(e.detail)+'</small>')}
   else if(e.type==='ledger'){ledger(e.entries);pollCharges()}
   else if(e.type==='reconciled')row('sys','<small>evidence on screen &middot; step '+e.step+'</small>'+esc(e.name)+' '+chip(e.status)+'<small>'+esc(e.evidence)+'</small>');
   else if(e.type==='resumed')row('sys','<small>resumed</small>Continuing run '+esc(e.from_run)+' from step '+e.from_step+' at '+esc(e.url));
   else if(e.type==='need_human'){badge('needs you','wait');row('human','<small>escalated to human</small>'+esc(e.question));
-    $('mq').textContent=e.question;$('mimg').src='data:image/jpeg;base64,'+e.image;$('mimg').style.display=e.kind==='captcha'?'block':'none';
+    const d=e.details;$('mt').textContent=d?'Approve this? It cannot be undone':'Human input needed';
+    $('mq').textContent=d?'The agent wants to click "'+d.button+'" ('+d.commit+'). Nothing has been sent yet.':e.question;
+    $('mdet').innerHTML=d?(d.amounts.map(a=>'<div class="amt">'+esc(a)+'</div>').join('')+(d.limit!=null&&d.total!=null?'<div>Total read from the page: Rs. '+d.total+' &middot; within your limit of Rs. '+d.limit+'</div>':'')+(d.fields.length?'<table>'+d.fields.map(f=>'<tr><td>'+esc(f[0])+'</td><td>'+esc(f[1])+'</td></tr>').join('')+'</table>':'')+'<div class="warn">Deny stops the run. Nothing is paid.</div>'):'';
+    notify(d?'FormPilot needs your approval':'FormPilot needs you',$('mq').textContent);
+    $('mimg').src='data:image/jpeg;base64,'+e.image;$('mimg').style.display=(e.kind==='captcha'||d)?'block':'none';
     $('phone').style.display=e.kind==='otp'?'block':'none';$('ans').value='';const cf=e.kind==='confirm',rc=e.kind==='reconcile';
     $('ans').style.display=cf?'none':'block';$('send').style.display=cf?'none':'inline-block';$('cbtns').style.display=cf?'inline':'none';$('rbtns').style.display=rc?'inline':'none';
     $('modal').className='show';if(!cf)$('ans').focus();
     if(e.kind==='otp'){pollSms();smsTimer=setInterval(pollSms,1000)}}
   else if(e.type==='human_answer'){row('human','<small>human replied</small>'+esc(e.text));badge('running','run')}
-  else if(e.type==='finished'){const ok=e.status==='success';row('fin '+(ok?'':'failed'),'<small>'+esc(e.status)+'</small>'+esc(e.summary)+(e.reference?'<br><b>Ref: '+esc(e.reference)+'</b>':''));
-    badge(ok?'complete':e.status,ok?'ok':'bad');$('go').disabled=false;$('stop').disabled=true;pollCharges();setTimeout(refreshResume,500)}
+  else if(e.type==='finished'){const ok=e.status==='success',dry=e.status==='dry_run';row('fin '+(ok?'':dry?'dry':'failed'),'<small>'+esc(e.status)+'</small>'+esc(e.summary)+(e.reference?'<br><b>Ref: '+esc(e.reference)+'</b>':''));
+    badge(ok?'complete':dry?'dry run done':e.status,ok?'ok':dry?'wait':'bad');$('go').disabled=false;$('stop').disabled=true;pollCharges();setTimeout(refreshResume,500)}
 };}
 async function pollSms(){try{const r=await (await fetch(portal()+'/__sms')).json();if(r.length)$('sms').textContent=r[r.length-1].text}catch(_){}}
 async function pollCharges(){try{const r=await (await fetch(portal()+'/__ledger')).json();
@@ -96,11 +107,13 @@ async function refreshResume(){try{const r=await (await fetch('/resumable?task_n
 async function refreshHealth(){try{const h=await (await fetch('/health')).json();
   $('health').innerHTML='Local model <b>'+esc(h.model)+'</b>: '+(h.model_ready?'<span style="color:#6fe08a">ready</span>':'<span style="color:#ff8a80">'+esc(h.message)+'</span>')+' &middot; coords '+esc(h.coord_mode)}catch(_){}}
 (async()=>{const ts=await (await fetch('/tasks')).json();$('tsel').innerHTML=ts.map(t=>'<option value="'+esc(t.name)+'">'+esc(t.title)+'</option>').join('');$('tsel').onchange=loadTask;loadTask();refreshHealth();setInterval(refreshHealth,10000)})();
-async function start(body){$('trace').innerHTML='';for(const k in rows)delete rows[k];$('go').disabled=true;$('stop').disabled=false;$('resume').style.display='none';badge('running','run');
+function notify(t,b){try{if(document.hidden&&window.Notification&&Notification.permission==='granted')new Notification(t,{body:b})}catch(_){}}
+async function start(body){try{if(window.Notification&&Notification.permission==='default')Notification.requestPermission()}catch(_){}
+  body={approve_commits:$('approve').checked,dry_run:$('dry').checked,max_amount:parseFloat($('limit').value)||null,...body};$('trace').innerHTML='';for(const k in rows)delete rows[k];$('go').disabled=true;$('stop').disabled=false;$('resume').style.display='none';badge('running','run');
   const r=await (await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fault:$('fault').value,...body})})).json();
   if(r.error){badge(r.error,'bad');$('go').disabled=false;$('stop').disabled=true}}
 $('go').onclick=()=>{ledger([]);start({task_name:$('tsel').value,url:$('url').value,task:$('task').value})};
-$('resume').onclick=()=>{if(resumable)start({resume_run_id:resumable.run_id,fault:''})};
+$('resume').onclick=()=>{if(resumable){$('dry').checked=false;start({resume_run_id:resumable.run_id,fault:'',dry_run:false})}};
 $('stop').onclick=()=>{fetch('/stop',{method:'POST'});$('modal').className=''};
 async function reply(a){clearInterval(smsTimer);$('modal').className='';await fetch('/human',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answer:a})})}
 $('yes').onclick=()=>reply('yes');$('no').onclick=()=>reply('no');$('paid').onclick=()=>reply('paid');$('notpaid').onclick=()=>reply('not paid');

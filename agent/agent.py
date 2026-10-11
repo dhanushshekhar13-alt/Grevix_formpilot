@@ -22,7 +22,7 @@ from typing import Awaitable, Callable, Optional
 
 from playwright.async_api import async_playwright
 
-from .actions import ActionExecutor, AskHuman, Done, Fail, Type, mask, parse_action, redacted
+from .actions import ActionExecutor, AskHuman, Click, Done, Fail, Type, mask, parse_action, redacted
 from .config import Settings, TaskSpec
 from .consequence import (COMMIT, CONFIRMED, DISPATCHED, DONE, HUMAN_CONFIRMED, HUMAN_VOIDED, IN_DOUBT, LOCAL,
                           NAVIGATE, OBSERVE, OPEN, REJECTED, RETRY_POLICY, Ledger, classify, commit_specs, probe)
@@ -54,6 +54,39 @@ EMPTY_FIELDS_JS = """() => {
     if (!g.some(r => r.checked)) out.push('none of the radio buttons [' + g.map(lab).join(' | ') + '] is selected');
   return out.slice(0, 8).join('; ');
 }"""
+# State of the form that a submit at [x, y] (or Enter, with [null, null]) would send: what is still missing, what is
+# filled in, and any money amounts on the page. Evidence for the pre-submit check and for the human's approval screen.
+FORM_STATE_JS = """([x, y]) => {
+  const el = x === null ? document.activeElement : document.elementFromPoint(x, y);
+  const c = el && el.closest('button,input,a,[role=button]');
+  const form = (c && c.form) || (el && el.closest('form'));
+  if (!form) return null;
+  const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
+  const rowLabel = e => { const tr = e.closest('tr'); return clean((e.labels && e.labels[0] && e.labels[0].innerText)
+    || (tr && tr.cells.length > 1 && tr.cells[0].innerText) || e.getAttribute('aria-label') || e.placeholder || e.name || e.id).slice(0, 50); };
+  const missing = [], filled = [], blank = [], groups = {};
+  for (const e of form.querySelectorAll('input,select,textarea')) {
+    const t = (e.type || '').toLowerCase();
+    if (e.offsetParent === null || e.disabled || ['submit', 'button', 'hidden', 'image', 'file', 'reset'].includes(t)) continue;
+    const raw = rowLabel(e), req = e.required || e.getAttribute('aria-required') === 'true' || raw.includes('*');
+    const label = clean(raw.replace(/\\*/g, ''));
+    if (t === 'radio') (groups[e.name] = groups[e.name] || []).push([e, label]);
+    else if (t === 'checkbox') { if (e.checked) filled.push([label, 'ticked']); else if (req) missing.push(`checkbox '${label}' is not ticked`); }
+    else if (e.tagName === 'SELECT') {
+      if (e.selectedIndex <= 0 && e.options.length > 1) { if (req) missing.push(`dropdown '${label}' still shows '${clean(e.options[0].text)}'`); }
+      else filled.push([label, clean(e.options[e.selectedIndex] && e.options[e.selectedIndex].text)]);
+    }
+    else if (!e.value) (req ? missing : blank).push(`text box '${label}' is empty`);
+    else filled.push([label, t === 'password' ? '\u2022\u2022\u2022' : e.value.slice(0, 60)]);
+  }
+  for (const g of Object.values(groups)) {
+    const on = g.find(r => r[0].checked);
+    if (on) filled.push(['selected option', on[1]]); else missing.push('none of the radio buttons [' + g.map(r => r[1]).join(' | ') + '] is selected');
+  }
+  const amounts = (document.body.innerText || '').split('\\n').map(clean)
+    .filter(l => /(?:Rs\\.?|\u20b9|INR)\\s?\\d[\\d,]*/i.test(l)).slice(0, 3).map(l => l.slice(0, 140));
+  return {missing: missing.slice(0, 8), blank: blank.slice(0, 4), filled: filled.slice(0, 14), amounts};
+}"""
 FOCUSED_VALUE_JS = "() => { const e = document.activeElement; return e && 'value' in e ? String(e.value) : null }"
 # What kind of secret a text field asks for, judged from the field itself and the images beside it (never from the model).
 CODE_FIELD_JS = """([x, y]) => {
@@ -66,7 +99,7 @@ CODE_FIELD_JS = """([x, y]) => {
 }"""
 HUMAN_ONLY_CODES = (("otp", r"\botp\b|one[- ]time", "the OTP sent to your phone"),
                     ("captcha", r"captcha|security code", "the characters shown in the CAPTCHA image"))
-RESUMABLE = ("running", "interrupted", "failed", "stopped", "incomplete")
+RESUMABLE = ("running", "interrupted", "failed", "stopped", "incomplete", "dry_run")
 
 
 class InjectedCrash(RuntimeError):
@@ -128,7 +161,8 @@ async def run_task(spec: TaskSpec, emit: Emit, ask_human: AskHumanCb, settings: 
     t_start = time.time()
     m = {"steps": 0, "actions_executed": 0, "retries": 0, "rejected_actions": 0, "malformed_steps": 0,
          "human_interventions": 0, "no_effect_actions": 0, "model_latency_total": 0.0, "model_calls": 0,
-         "commits_dispatched": 0, "duplicate_commits_blocked": 0, "in_doubt_events": 0, "reconciled": 0}
+         "commits_dispatched": 0, "duplicate_commits_blocked": 0, "in_doubt_events": 0, "reconciled": 0,
+         "submits_held": 0}
     result = {"status": "failed", "summary": "", "reference": None, "verified": False}
     trace_f = (run_dir / "trace.jsonl").open("w")
     ledger = Ledger(run_dir / "ledger.json")
@@ -285,6 +319,7 @@ async def run_task(spec: TaskSpec, emit: Emit, ask_human: AskHumanCb, settings: 
         no_change, escalations, bad_done = 0, 0, 0
         consecutive_bad = 0
         commit_blocks: dict = {}
+        holds: dict = {}         # (url, what is missing) -> how often a submit was held back for it
         err_told = ""            # page error the model has already been told about (reset when a step is submitted)
         human_codes: dict = {}   # kind -> the human's latest OTP / CAPTCHA reply that has not been submitted yet
         typed_codes: set = set()
@@ -473,6 +508,35 @@ async def run_task(spec: TaskSpec, emit: Emit, ask_human: AskHumanCb, settings: 
                     await checkpoint()
                     continue
 
+                # A submit is only worth sending if its form is complete. Decided from the form itself, before anything is
+                # logged as an intent: a doomed click on Pay must not become an irreversible action of unknown outcome.
+                form = None
+                if pr.get("submits") and effect in (NAVIGATE, COMMIT):
+                    try:
+                        form = await page.evaluate(FORM_STATE_JS, [act.x, act.y] if isinstance(act, Click) else [None, None])
+                    except Exception:
+                        form = None
+                # A repeat of an irreversible action is refused below whatever the form looks like: saying "fill the form"
+                # there would invite the model to set up a second payment.
+                repeat = effect == COMMIT and ledger.blocking(cspec.name) is not None
+                if form and effect == COMMIT:  # before an irreversible click every empty box counts, marked required or not
+                    form["missing"] = form["missing"] + form.get("blank", [])
+                if form and form["missing"] and s.presubmit_check and not repeat:
+                    gaps = mask("; ".join(form["missing"]), secrets)
+                    hk = (page.url, gaps)
+                    holds[hk] = holds.get(hk, 0) + 1
+                    if holds[hk] <= 2:  # after two holds the portal gets to judge: the check may be wrong about what is required
+                        m["submits_held"] += 1
+                        why = f"the form is not complete: {gaps}"
+                        rec.update(dispatched=False, result="HELD, not executed: " + why, form_gaps=form["missing"])
+                        await outcome("held", why)
+                        record(rec)
+                        history.append(f"{step}. {act.action} '{shown_label}' → HELD (not executed): {why}")
+                        warnings.append(f"'{shown_label}' was NOT clicked because {why}. Fill each of these, one action each, then click it again.")
+                        await checkpoint()
+                        continue
+                    rec["form_gaps_ignored"] = form["missing"]
+
                 attempt = None
                 if effect == COMMIT:
                     prior = ledger.blocking(cspec.name)
@@ -526,10 +590,52 @@ async def run_task(spec: TaskSpec, emit: Emit, ask_human: AskHumanCb, settings: 
                         else:
                             human_inputs.append(f"guidance: {ans}")
                             continue
-                    human_first = cspec.human_first if cspec.human_first is not None else not spec.mock
+                    # What is about to happen, read from the page and not taken from the model's description.
+                    figures = cspec.amount(await page_text())
+                    total = round(sum(figures), 2)
+                    limits = [x for x in (cspec.max_amount, s.max_amount) if x is not None]
+                    details = {"button": shown_label or cspec.name, "commit": cspec.name, "page": page.url,
+                               "amounts": [mask(a, secrets) for a in (form or {}).get("amounts", [])],
+                               "fields": [[k, mask(v, secrets)] for k, v in (form or {}).get("filled", [])],
+                               "total": total if figures else None, "limit": min(limits) if limits else None}
+
+                    # Hard spending limit: not a question for the model or the approval screen. Over it, or unreadable when
+                    # the task demands a cap, means nothing is sent and the run stops.
+                    over = None
+                    if limits and figures and total > min(limits):
+                        over = (f"the page shows Rs. {' + '.join(f'{x:g}' for x in figures)}{f' = {total:g}' if len(figures) > 1 else ''}, "
+                                f"over the limit of Rs. {min(limits):g}")
+                    elif cspec.max_amount is not None and not figures:
+                        over = f"no amount can be read on this page, so the limit of Rs. {cspec.max_amount:g} cannot be checked"
+                    if over:
+                        why = f"'{details['button']}' was not clicked: {over}. Nothing was sent."
+                        rec.update(dispatched=False, result="STOPPED, not executed: " + over, limit=details["limit"], amount_seen=figures)
+                        await outcome("over_limit", over)
+                        record(rec)
+                        await fail(why, "stopped"); finished = True
+                        break
+
+                    # Dry run: everything up to here was real (the form is filled and complete); the irreversible click is not made.
+                    if s.dry_run:
+                        seen = (" The page says: " + " / ".join(details["amounts"]) + "." if details["amounts"] else "")
+                        rec.update(dispatched=False, result=f"DRY RUN, not executed: would click '{details['button']}'", would_send=details)
+                        await outcome("dry_run", f"would click '{details['button']}' ({cspec.name})")
+                        record(rec)
+                        await fail(f"Dry run complete: the form is filled and ready, and '{details['button']}' ({cspec.name}) was NOT clicked."
+                                   f"{seen} Nothing was sent. Press Resume to continue for real from here.", "dry_run"); finished = True
+                        break
+
+                    human_first = (s.approve_commits if s.approve_commits is not None else
+                                   cspec.human_first if cspec.human_first is not None else not spec.mock)
                     if human_first and not approved:
-                        q = f"The agent is about to '{shown_label or cspec.name}' ({cspec.name}). This cannot be undone. Approve?"
-                        await ev({"type": "need_human", "kind": "confirm", "question": q, "image": base64.b64encode(before).decode()})
+                        q = (f"The agent is about to click '{details['button']}' ({cspec.name}). This cannot be undone."
+                             + (" The page says: " + " / ".join(details["amounts"]) + "." if details["amounts"] else "")
+                             + (" It will send: " + "; ".join(f"{k}: {v}" for k, v in details["fields"]) + "." if details["fields"] else "")
+                             + (f" Within your limit of Rs. {details['limit']:g}." if details["limit"] is not None and figures else "")
+                             + " Approve?")
+                        rec["approval_shown"] = details
+                        await ev({"type": "need_human", "kind": "confirm", "question": q, "details": details,
+                                  "image": base64.b64encode(before).decode()})
                         ans = await await_human("confirm", q)
                         if ans is None:
                             record(rec); await fail("stopped by user" if stop.is_set() else "timed out waiting for human input", "stopped" if stop.is_set() else "failed"); finished = True

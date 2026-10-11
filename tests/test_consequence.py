@@ -9,7 +9,7 @@ from agent.actions import parse_action
 from agent.agent import latest_resumable, load_checkpoint, run_task
 from agent.consequence import (COMMIT, CONFIRMED, IN_DOUBT, INTENT, LOCAL, NAVIGATE, OBSERVE, REJECTED, CommitSpec, Ledger,
                                classify)
-from tests.helpers import ScriptedPlanner, human_oracle
+from tests.helpers import ScriptedPlanner, SeqPlanner, human_oracle
 
 PAY = CommitSpec("fee_payment", r"\b(pay now|pay again)\b", r"Reference No:\s*(\w+)|Payment received", r"Select UPI")
 
@@ -126,7 +126,127 @@ async def test_crash_and_session_expiry_together(settings, spec, sink, portal):
     assert planner.seen[:2] == ["/expired", "/resume"]  # replaying the old cookie does not revive an expired session
 
 
+async def test_incomplete_payment_form_is_held_before_any_intent_is_logged(settings, spec, sink, portal):
+    res = await run_task(spec, sink, human_oracle(), settings, planner=ScriptedPlanner(pay_without_upi=True))
+    assert res["status"] == "success", res
+    assert charges(portal) == 1 and res["metrics"]["submits_held"] == 1
+    [a] = ledger_of(res)  # the held click never became an irreversible attempt
+    assert [h[0] for h in a["history"]] == ["intent", "dispatched", "confirmed"]
+    [held] = [r for r in trace(res) if r.get("outcome") == "held"]
+    assert held["dispatched"] is False and "radio buttons" in held["result"] and "attempt" not in held
+
+
+async def test_irreversible_click_is_held_for_any_empty_box_and_never_offered_for_approval(settings, spec, sink, portal):
+    settings.approve_commits = True
+    human = human_oracle()
+    res = await run_task(spec, sink, human, settings, planner=ScriptedPlanner(pay_without_upi_id=True))
+    assert res["status"] == "success" and charges(portal) == 1 and human.log.count("confirm") == 1
+    [held] = [r for r in trace(res) if r.get("outcome") == "held"]
+    assert "text box 'name@bank' is empty" in held["result"] and "approval_shown" not in held
+    [a] = ledger_of(res)
+    assert [h[0] for h in a["history"]] == ["intent", "dispatched", "confirmed"]
+
+
+async def test_human_approves_payment_with_facts_read_from_the_page(settings, spec, sink, portal):
+    settings.approve_commits = True
+    human = human_oracle()
+    res = await run_task(spec, sink, human, settings, planner=ScriptedPlanner())
+    assert res["status"] == "success" and charges(portal) == 1 and human.log.count("confirm") == 1
+    [ask] = [e for e in sink.of("need_human") if e["kind"] == "confirm"]
+    d = ask["details"]
+    assert d["button"] == "Pay Now" and any("800" in a for a in d["amounts"]) and ["selected option", "UPI"] in d["fields"]
+    assert "ananya@okaxis" not in json.dumps(d)  # the UPI ID is a secret: masked on the approval screen and in the trace
+    [pay] = [r for r in trace(res) if r.get("commit") == "fee_payment"]
+    assert pay["approval_shown"] == d and pay["human"]["answer"] == "yes"
+
+
+async def test_declined_payment_is_never_dispatched(settings, spec, sink, portal):
+    settings.approve_commits = True
+    base = human_oracle()
+
+    async def human(kind, q):
+        return "no" if kind == "confirm" else await base(kind, q)
+    res = await run_task(spec, sink, human, settings, planner=ScriptedPlanner())
+    assert res["status"] == "stopped" and charges(portal) == 0 and res["ledger"] == []
+
+
+async def test_payment_over_the_spending_limit_is_never_sent(settings, spec, sink, portal):
+    spec.commits[0]["max_amount"] = 500  # the portal asks for Rs. 800 + Rs. 18
+    settings.approve_commits = True
+    human = human_oracle()
+    res = await run_task(spec, sink, human, settings, planner=ScriptedPlanner())
+    assert res["status"] == "stopped" and "over the limit of Rs. 500" in res["summary"] and "800 + 18 = 818" in res["summary"]
+    assert charges(portal) == 0 and res["ledger"] == [] and "confirm" not in human.log  # not even offered for approval
+    [stop] = [r for r in trace(res) if r.get("outcome") == "over_limit"]
+    assert stop["dispatched"] is False and stop["amount_seen"] == [800.0, 18.0] and "attempt" not in stop
+
+
+async def test_run_wide_limit_applies_on_top_of_the_task_cap(settings, spec, sink, portal):
+    settings.max_amount = 817  # set from the dashboard; lower than the task's own cap of 1000
+    res = await run_task(spec, sink, human_oracle(), settings, planner=ScriptedPlanner())
+    assert res["status"] == "stopped" and "over the limit of Rs. 817" in res["summary"] and charges(portal) == 0
+
+
+async def test_capped_payment_is_refused_when_no_amount_can_be_read(settings, spec, sink, portal):
+    # the landing page shows no amount at all: with a cap in the task, an unreadable amount is not "probably fine"
+    res = await run_task(spec, sink, human_oracle(), settings,
+                         planner=SeqPlanner([{"action": "click", "x": 100, "y": 100, "irreversible": True, "target": "Pay Now"}]))
+    assert res["status"] == "stopped" and "no amount can be read" in res["summary"] and res["ledger"] == []
+
+
+async def test_dry_run_fills_everything_stops_before_pay_then_resumes_for_real(settings, spec, sink, portal):
+    settings.dry_run = True
+    settings.approve_commits = True
+    human = human_oracle()
+    res = await run_task(spec, sink, human, settings, planner=ScriptedPlanner())
+    assert res["status"] == "dry_run" and "NOT clicked" in res["summary"] and "Rs. 800" in res["summary"]
+    assert charges(portal) == 0 and res["ledger"] == [] and "confirm" not in human.log
+    [last] = [r for r in trace(res) if r.get("outcome") == "dry_run"]
+    assert last["dispatched"] is False and last["observed_target"] == "Pay Now" and "attempt" not in last
+    assert ["selected option", "UPI"] in last["would_send"]["fields"] and last["would_send"]["total"] == 818
+    assert not [r for r in trace(res) if r.get("form_gaps")]  # it stopped with the form complete, not on a half-filled one
+    # the same run, continued for real: no second OTP or CAPTCHA, the human approves, exactly one charge
+    cp = latest_resumable(settings.runs_dir, spec.name)
+    assert cp["run_id"] == res["run_id"]
+    settings.dry_run = False
+    planner = ScriptedPlanner()
+    planner.i = 24  # the fee page: choose UPI, type the UPI ID, Pay Now
+    res2 = await run_task(spec, sink, human, settings, planner=planner, resume=cp)
+    assert res2["status"] == "success" and charges(portal) == 1
+    assert human.log == ["otp", "captcha", "confirm"]
+
+
+FINAL = ("data:text/html,<h3>Review your application</h3><button type='button' style='position:absolute;left:40px;top:120px;width:160px;height:40px' "
+         "onclick=\"document.body.innerHTML='<h3>Application Submitted. Ref: AB12345678</h3>'\">{label}</button>")
+
+
+async def test_any_irreversible_button_needs_approval_not_only_payments(settings, spec, sink):
+    spec.url, spec.commits, spec.success_regex = FINAL.format(label="Final Submit"), [], r"Application Submitted\. Ref: ([A-Z0-9]{8,})"
+    settings.approve_commits = True
+    human = human_oracle()
+    # the model does not flag it and the task does not declare it: the button's own label is enough
+    res = await run_task(spec, sink, human, settings, planner=SeqPlanner([
+        {"action": "click", "x": 120, "y": 140, "target": "next"}, {"action": "done", "summary": "submitted", "reference": "AB12345678"}]))
+    assert res["status"] == "success" and human.log == ["confirm"]
+    [a] = res["ledger"]
+    assert a["name"] == "irreversible: Final Submit" and [h[0] for h in a["history"]] == ["intent", "dispatched", "confirmed"]
+    [step] = [r for r in trace(res) if r.get("commit")]
+    assert step["effect"] == COMMIT and step["approval_shown"]["button"] == "Final Submit" and step["claimed_target"] == "next"
+
+
+async def test_denied_irreversible_button_is_never_clicked(settings, spec, sink):
+    spec.url, spec.commits = FINAL.format(label="Cancel Registration"), []
+    settings.approve_commits = True
+
+    async def deny(kind, q):
+        return "no"
+    res = await run_task(spec, sink, deny, settings, planner=SeqPlanner([{"action": "click", "x": 120, "y": 140}]))
+    assert res["status"] == "stopped" and "declined" in res["summary"] and res["ledger"] == []
+    assert res["metrics"]["commits_dispatched"] == 0 and res["metrics"]["actions_executed"] == 0
+
+
 async def test_provably_rejected_payment_may_be_retried(settings, spec, sink, portal):
+    settings.presubmit_check = False  # let the incomplete form through, so the portal itself rejects it
     res = await run_task(spec, sink, human_oracle(), settings, planner=ScriptedPlanner(pay_without_upi=True))
     assert res["status"] == "success", res
     assert charges(portal) == 1
@@ -141,6 +261,9 @@ def _act(raw):
 
 @pytest.mark.parametrize("raw,probe,want", [
     ({"action": "scroll", "dy": 300}, {}, OBSERVE),
+    ({"action": "click", "x": 5, "y": 5}, {"actionable": True, "submits": False, "tag": "BUTTON", "label": "Delete application"}, COMMIT),
+    ({"action": "click", "x": 5, "y": 5}, {"actionable": True, "submits": True, "label": "Proceed to Payment"}, NAVIGATE),
+    ({"action": "click", "x": 5, "y": 5}, {"actionable": True, "field": True, "tag": "INPUT", "label": "delete"}, LOCAL),
     ({"action": "type", "text": "x", "x": 5, "y": 5}, {}, LOCAL),
     ({"action": "press", "key": "Tab"}, {}, LOCAL),
     # the model's words say "pay", but the pointer is on a radio button: not a payment
