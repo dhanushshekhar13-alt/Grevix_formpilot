@@ -1,0 +1,43 @@
+{
+  "title": "SBEE-2026 exam registration (mock)",
+  "url": "http://localhost:5050/",
+  "task": "Register me for the SBEE 2026 entrance exam and pay the application fee.",
+  "profile": {
+    "name": "Ananya Rao",
+    "father_name": "Suresh Rao",
+    "date_of_birth": "14/08/2004",
+    "mobile": "9876543210",
+    "email": "ananya.rao@example.com",
+    "aadhaar": "123412341234",
+    "category": "General",
+    "preferred_exam_state": "Karnataka",
+    "preferred_exam_city": "Bengaluru",
+    "preferred_centre": "any centre in the preferred city is fine",
+    "payment": {
+      "method": "UPI",
+      "upi_id": "ananya@okaxis"
+    }
+  },
+  "hints": [
+    "The real registration link is a small 'Click here to register' link, not the big login links.",
+    "Date of birth is three dropdowns (DD, MM, YYYY). Mobile must be 10 digits with no +91.",
+    "Category labels may differ from the profile wording (e.g. General = GEN).",
+    "After a validation error the form reloads and its dropdowns reset. Before clicking Save & Continue, check that EVERY dropdown (DD, MM, YYYY and Category) shows a value; re-select any that show DD, MM, YYYY or '-- Select --'.",
+    "On the Fee page do three separate actions in this order: 1) click the small round radio button just left of the word UPI, 2) type the UPI ID into the name@bank box, 3) click Pay Now. If the page says 'Select UPI', the radio button is not selected: click it."
+  ],
+  "success_regex": "Registration Successful[\\s\\S]*?Reference No:\\s*([A-Z0-9]{8,})",
+  "sensitive_keys": [
+    "aadhaar",
+    "mobile",
+    "upi_id"
+  ],
+  "mock": true,
+  "commits": [
+    {
+      "name": "fee_payment",
+      "label_regex": "\\b(pay now|pay again|make payment|confirm payment|retry payment)\\b",
+      "confirmed_regex": "Registration Successful[\\s\\S]*?Reference No:\\s*([A-Z0-9]{8,})|Payment received",
+      "rejected_regex": "Select UPI and enter a valid UPI ID"
+    }
+  ]
+}

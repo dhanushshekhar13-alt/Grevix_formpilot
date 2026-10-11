@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FormPilot AI</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--tx:#e8eaf0;--mut:#8b93a7;--acc:#ff9933;--grn:#138808;--blu:#4f8cff;--red:#ef5350;--amb:#ffc266}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--line)}
+header h1{font-size:18px;margin:0}header h1 b{color:var(--acc)}header span{color:var(--mut);font-size:12px}
+.badge{margin-left:auto;padding:3px 10px;border-radius:99px;background:var(--line);font-size:12px}
+.badge.run{background:#2b3a1f;color:#9be36b}.badge.ok{background:#12351a;color:#6fe08a}.badge.bad{background:#3d1a1a;color:#ff8a80}.badge.wait{background:#3d2f12;color:var(--amb)}
+main{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;padding:16px 20px;height:calc(100vh - 56px)}
+@media(max-width:900px){main{grid-template-columns:1fr;height:auto;padding:16px}.ctrl{flex-wrap:wrap}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;display:flex;flex-direction:column;min-height:0}
+.card h2{margin:0 0 8px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
+.col{display:flex;flex-direction:column;gap:16px;min-height:0}
+#screen{width:100%;border-radius:6px;border:1px solid var(--line);background:#000;aspect-ratio:1280/800;object-fit:contain}
+.ctrl{display:flex;gap:8px;margin-bottom:10px}.ctrl select{background:#0c0e12;border:1px solid var(--line);color:var(--tx);border-radius:6px;padding:8px;min-width:0}.ctrl input{flex:1;min-width:0;background:#0c0e12;border:1px solid var(--line);color:var(--tx);border-radius:6px;padding:8px}
+button{background:var(--acc);color:#111;border:0;border-radius:6px;padding:8px 16px;font-weight:600;cursor:pointer}button:disabled{opacity:.4}
+button.sec{background:var(--line);color:var(--tx)}
+#trace{overflow:auto;flex:1}.row{padding:8px 10px;border-left:3px solid var(--line);margin-bottom:6px;background:#12151b;border-radius:0 6px 6px 0}
+.row small{color:var(--mut);display:block}.row.thought{border-color:var(--blu)}.row.action{border-color:var(--acc)}.row.action.commit{border-color:var(--red)}.row.human{border-color:var(--amb)}.row.fin{border-color:var(--grn);background:#10261a}.row.failed{border-color:var(--red)}.row.sys{border-color:#9b7bff}
+.row code{color:var(--acc)}
+.chip{display:inline-block;font-size:10px;padding:1px 7px;border-radius:99px;margin-left:6px;background:var(--line);color:var(--mut);vertical-align:1px}
+.chip.commit,.chip.blocked,.chip.error,.chip.rejected,.chip.mismatch{background:#3d1a1a;color:#ff8a80}
+.chip.in_doubt,.chip.intent,.chip.dispatched,.chip.unverified{background:#3d2f12;color:var(--amb)}
+.chip.confirmed,.chip.verified,.chip.human_confirmed,.chip.changed{background:#12351a;color:#6fe08a}
+#ledger{font-size:13px}#ledger .e{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}#ledger .e:first-child{border-top:0}
+#ledger .muted,#charges{color:var(--mut);font-size:12px}
+#modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);align-items:center;justify-content:center;z-index:9}
+#modal.show{display:flex}#modal .box{background:var(--card);border:1px solid var(--acc);border-radius:12px;padding:18px;width:min(560px,92vw)}
+#modal img{width:100%;border-radius:6px;margin:8px 0}#modal input{width:100%;padding:10px;font-size:18px;letter-spacing:.2em;background:#0c0e12;border:1px solid var(--line);color:var(--tx);border-radius:6px;margin-bottom:10px}
+.phone{background:#0c0e12;border:1px dashed var(--line);border-radius:8px;padding:8px;margin:8px 0;font-size:13px}.phone b{color:#6fe08a}
+</style></head><body>
+<header><h1>Form<b>Pilot</b> AI</h1><span>Vision agent for messy Indian portals &middot; no APIs, just pixels</span><div class="badge" id="badge">idle</div></header>
+<main>
+  <section class="card"><h2>Live browser view</h2>
+    <div class="ctrl"><select id="tsel"></select><button id="go">Run agent</button><button id="resume" class="sec" style="display:none">Resume</button><button id="stop" style="background:var(--red);color:#fff" disabled>Stop</button></div>
+    <div class="ctrl"><input id="url" placeholder="Portal URL"><input id="task" placeholder="Task"></div>
+    <div class="ctrl"><select id="fault" style="flex:1">
+      <option value="">No injected failure</option>
+      <option value="expire_after_pay">Inject: session expires right after the payment is taken</option>
+      <option value="crash_after_commit">Inject: agent crashes right after clicking Pay</option>
+      <option value="both">Inject: both (crash + expired session)</option></select></div>
+    <div id="health" style="font-size:12px;color:var(--mut);margin-bottom:8px"></div>
+    <img id="screen" alt="agent view">
+  </section>
+  <div class="col">
+    <section class="card" style="flex:0 0 auto"><h2>Irreversible actions</h2><div id="ledger"><span class="muted">None attempted yet.</span></div><div id="charges"></div></section>
+    <section class="card" style="flex:1"><h2>Action trace</h2><div id="trace"></div></section>
+  </div>
+</main>
+<div id="modal"><div class="box">
+  <h2 style="margin:0;color:var(--acc)" id="mt">Human input needed</h2><p id="mq"></p>
+  <img id="mimg" alt="">
+  <div class="phone" id="phone" style="display:none"><b>Your phone (SMS):</b><div id="sms">No messages yet</div></div>
+  <input id="ans" autocomplete="off" placeholder="Type here"><button id="send">Send to agent</button>
+  <span id="cbtns" style="display:none"><button id="yes">Approve</button> <button id="no" style="background:var(--red);color:#fff">Deny</button></span>
+  <span id="rbtns" style="display:none"><button id="paid">It went through</button> <button id="notpaid" class="sec">Not charged: allow one retry</button></span>
+</div></div>
+<script>
+const $=s=>document.getElementById(s);let smsTimer;const rows={};
+function badge(t,c){$('badge').textContent=t;$('badge').className='badge '+(c||'')}
+function row(cls,html){const d=document.createElement('div');d.className='row '+cls;d.innerHTML=html;$('trace').appendChild(d);$('trace').scrollTop=1e9;return d}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const chip=(t,c)=>'<span class="chip '+esc(c||t)+'">'+esc(t.replace('_',' '))+'</span>';
+const portal=()=>{try{return new URL($('url').value).origin}catch(_){return 'http://localhost:5050'}};
+function ledger(es){if(!es.length){$('ledger').innerHTML='<span class="muted">None attempted yet.</span>';return}
+  $('ledger').innerHTML=es.map(a=>'<div class="e"><b>'+esc(a.name)+'</b><span class="muted">'+esc(a.label||'')+' &middot; step '+a.step+'</span>'+chip(a.status)+(a.reference?'<span class="muted">ref '+esc(a.reference)+'</span>':'')+'</div>').join('')}
+function connect(){const es=new EventSource('/events');es.onmessage=m=>{const e=JSON.parse(m.data);
+  if(e.type==='screenshot'){$('screen').src='data:image/jpeg;base64,'+e.image;if(e.result&&e.result.startsWith('error'))row('failed','<small>step '+e.step+'</small>'+esc(e.result))}
+  else if(e.type==='thought')row('thought','<small>reading screen &middot; step '+e.step+'</small>'+esc(e.text));
+  else if(e.type==='action'&&e.name!=='ask_human'&&e.name!=='done'&&e.name!=='error')rows[e.step]=row('action'+(e.effect==='commit'?' commit':''),'<small>acting &middot; step '+e.step+chip(e.effect)+'</small><code>'+esc(e.text)+'</code>');
+  else if(e.type==='outcome'){const r=rows[e.step];if(r)r.querySelector('small').insertAdjacentHTML('beforeend',chip(e.outcome));
+    if(['blocked','in_doubt','rejected','mismatch'].includes(e.outcome)&&r)r.insertAdjacentHTML('beforeend','<small>'+esc(e.detail)+'</small>')}
+  else if(e.type==='ledger'){ledger(e.entries);pollCharges()}
+  else if(e.type==='reconciled')row('sys','<small>evidence on screen &middot; step '+e.step+'</small>'+esc(e.name)+' '+chip(e.status)+'<small>'+esc(e.evidence)+'</small>');
+  else if(e.type==='resumed')row('sys','<small>resumed</small>Continuing run '+esc(e.from_run)+' from step '+e.from_step+' at '+esc(e.url));
+  else if(e.type==='need_human'){badge('needs you','wait');row('human','<small>escalated to human</small>'+esc(e.question));
+    $('mq').textContent=e.question;$('mimg').src='data:image/jpeg;base64,'+e.image;$('mimg').style.display=e.kind==='captcha'?'block':'none';
+    $('phone').style.display=e.kind==='otp'?'block':'none';$('ans').value='';const cf=e.kind==='confirm',rc=e.kind==='reconcile';
+    $('ans').style.display=cf?'none':'block';$('send').style.display=cf?'none':'inline-block';$('cbtns').style.display=cf?'inline':'none';$('rbtns').style.display=rc?'inline':'none';
+    $('modal').className='show';if(!cf)$('ans').focus();
+    if(e.kind==='otp'){pollSms();smsTimer=setInterval(pollSms,1000)}}
+  else if(e.type==='human_answer'){row('human','<small>human replied</small>'+esc(e.text));badge('running','run')}
+  else if(e.type==='finished'){const ok=e.status==='success';row('fin '+(ok?'':'failed'),'<small>'+esc(e.status)+'</small>'+esc(e.summary)+(e.reference?'<br><b>Ref: '+esc(e.reference)+'</b>':''));
+    badge(ok?'complete':e.status,ok?'ok':'bad');$('go').disabled=false;$('stop').disabled=true;pollCharges();setTimeout(refreshResume,500)}
+};}
+async function pollSms(){try{const r=await (await fetch(portal()+'/__sms')).json();if(r.length)$('sms').textContent=r[r.length-1].text}catch(_){}}
+async function pollCharges(){try{const r=await (await fetch(portal()+'/__ledger')).json();
+  $('charges').textContent='Portal ground truth: '+r.count+' charge'+(r.count===1?'':'s')+' recorded'+(r.fault?' · fault armed: '+r.fault:'')}catch(_){$('charges').textContent=''}}
+async function loadTask(){const t=await (await fetch('/tasks/'+$('tsel').value)).json();$('url').value=t.url;$('task').value=t.task;pollCharges();refreshResume()}
+let resumable=null;
+async function refreshResume(){try{const r=await (await fetch('/resumable?task_name='+encodeURIComponent($('tsel').value))).json();resumable=r.run;
+  $('resume').style.display=resumable?'inline-block':'none';
+  if(resumable){$('resume').textContent='Resume ('+resumable.status+' @ step '+resumable.step+')';$('resume').title=resumable.reason||'';if(!$('trace').children.length)ledger(r.ledger)}}catch(_){}}
+async function refreshHealth(){try{const h=await (await fetch('/health')).json();
+  $('health').innerHTML='Local model <b>'+esc(h.model)+'</b>: '+(h.model_ready?'<span style="color:#6fe08a">ready</span>':'<span style="color:#ff8a80">'+esc(h.message)+'</span>')+' &middot; coords '+esc(h.coord_mode)}catch(_){}}
+(async()=>{const ts=await (await fetch('/tasks')).json();$('tsel').innerHTML=ts.map(t=>'<option value="'+esc(t.name)+'">'+esc(t.title)+'</option>').join('');$('tsel').onchange=loadTask;loadTask();refreshHealth();setInterval(refreshHealth,10000)})();
+async function start(body){$('trace').innerHTML='';for(const k in rows)delete rows[k];$('go').disabled=true;$('stop').disabled=false;$('resume').style.display='none';badge('running','run');
+  const r=await (await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fault:$('fault').value,...body})})).json();
+  if(r.error){badge(r.error,'bad');$('go').disabled=false;$('stop').disabled=true}}
+$('go').onclick=()=>{ledger([]);start({task_name:$('tsel').value,url:$('url').value,task:$('task').value})};
+$('resume').onclick=()=>{if(resumable)start({resume_run_id:resumable.run_id,fault:''})};
+$('stop').onclick=()=>{fetch('/stop',{method:'POST'});$('modal').className=''};
+async function reply(a){clearInterval(smsTimer);$('modal').className='';await fetch('/human',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answer:a})})}
+$('yes').onclick=()=>reply('yes');$('no').onclick=()=>reply('no');$('paid').onclick=()=>reply('paid');$('notpaid').onclick=()=>reply('not paid');
+$('send').onclick=()=>reply($('ans').value);$('ans').onkeydown=e=>{if(e.key==='Enter')reply($('ans').value)};
+connect();
+</script></body></html>
